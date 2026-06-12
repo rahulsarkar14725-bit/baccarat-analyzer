@@ -1,0 +1,904 @@
+import { useState, useCallback, useRef, useEffect } from "react";
+
+const ROWS_BEAD=6,COLS_BEAD=18,ROWS_BIG=6,COLS_BIG=22;
+const B_COLOR='#1a9fbe', P_COLOR='#d04030';
+const PRESET=[...Array(17).fill('B'),'P','P','P','P','B','P','P','B','P','P','B','B','P'];
+const SUITS=['♠','♥','♦','♣'];
+const SUIT_COLOR={'♠':'#c8d8e8','♥':'#e86060','♦':'#e86060','♣':'#c8d8e8'};
+const VALUES=['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+const TOTAL_DECKS=8;
+
+function freshDeck(){const d={};for(const v of VALUES)d[v]=4*TOTAL_DECKS;return d;}
+
+function buildBeadGrid(seq){
+  const g=Array.from({length:ROWS_BEAD},()=>Array(COLS_BEAD).fill(null));
+  let idx=0;
+  outer:for(let c=0;c<COLS_BEAD;c++)for(let r=0;r<ROWS_BEAD;r++){if(idx>=seq.length)break outer;g[r][c]=seq[idx++];}
+  return g;
+}
+function buildBigGrid(seq){
+  const g=Array.from({length:ROWS_BIG},()=>Array(COLS_BIG).fill(null));
+  let col=0,row=0,prev=null;
+  for(const v of seq){if(prev!==null&&v!==prev){col++;row=0;}if(col<COLS_BIG&&row<ROWS_BIG){g[row][col]=v;row++;}prev=v;}
+  return g;
+}
+function calcProb(seq){
+  if(seq.length<3)return{b:50.9,p:49.1,streak:null,streakLen:0,bCount:seq.filter(x=>x==='B').length,pCount:seq.filter(x=>x==='P').length};
+  const total=seq.length,bCount=seq.filter(x=>x==='B').length,pCount=total-bCount;
+  let bp=bCount/total,pp=pCount/total;
+  let streak=seq[seq.length-1],sLen=1;
+  for(let i=seq.length-2;i>=0;i--){if(seq[i]===streak)sLen++;else break;}
+  const sw=Math.min(0.28,sLen*0.045);
+  if(streak==='B'){bp=Math.max(0.15,bp-sw);pp=Math.min(0.85,pp+sw);}
+  else{pp=Math.max(0.15,pp-sw);bp=Math.min(0.85,bp+sw);}
+  const last6=seq.slice(-6);let alt=0;
+  for(let i=1;i<last6.length;i++)if(last6[i]!==last6[i-1])alt++;
+  if(alt>=4){if(streak==='B')pp=Math.min(0.85,pp+0.04);else bp=Math.min(0.85,bp+0.04);}
+  const sum=bp+pp;
+  return{b:Math.round((bp/sum)*1000)/10,p:Math.round((pp/sum)*1000)/10,streak,streakLen:sLen,bCount,pCount};
+}
+
+function abMultiplier(n){
+  if(n<=3) return{min:8,max:25,label:'🔥 Jackpot Zone',color:'#e07040'};
+  if(n<=6) return{min:4,max:8,label:'⚡ High Payout',color:'#dfc050'};
+  if(n<=10)return{min:2,max:4,label:'💰 Medium Payout',color:'#50c888'};
+  if(n<=16)return{min:1.5,max:2,label:'📊 Low Payout',color:'#4ab8d8'};
+  if(n<=25)return{min:0.9,max:1.5,label:'⚖️ Even Zone',color:'#8090a0'};
+  return{min:0.5,max:0.9,label:'📉 Long Shot',color:'#604050'};
+}
+
+// ── Exact buckets ───────────────────────────────────────────────
+const CD_BUCKETS=[
+  {label:'1–5',  min:1, max:5, color:'#e05030'},
+  {label:'6–10', min:6, max:10,color:'#e07820'},
+  {label:'11–15',min:11,max:15,color:'#c89020'},
+  {label:'16–20',min:16,max:20,color:'#a8b020'},
+  {label:'21–25',min:21,max:25,color:'#60b830'},
+  {label:'26–30',min:26,max:30,color:'#28b868'},
+  {label:'31–35',min:31,max:35,color:'#18b8a8'},
+  {label:'36–40',min:36,max:40,color:'#2090d0'},
+  {label:'41–45',min:41,max:45,color:'#4060e0'},
+  {label:'46–49',min:46,max:49,color:'#8040c0'},
+];
+  {label:'1–5',   min:1,  max:5,  color:'#e05030'},
+  {label:'6–10',  min:6,  max:10, color:'#e07020'},
+  {label:'11–15', min:11, max:15, color:'#c89020'},
+  {label:'16–20', min:16, max:20, color:'#a8a820'},
+  {label:'21–25', min:21, max:25, color:'#70b830'},
+  {label:'26–30', min:26, max:30, color:'#30b870'},
+  {label:'31–35', min:31, max:35, color:'#20b8a8'},
+  {label:'36–40', min:36, max:40, color:'#2090d0'},
+  {label:'41–45', min:41, max:45, color:'#4060e0'},
+  {label:'46–49', min:46, max:49, color:'#8040c0'},
+];
+
+function buildPrediction(rounds, cardsSoFar){
+  if(rounds.length===0) return null;
+  const counts = rounds.map(r=>r.openedAt);
+  const total  = counts.length;
+  const sorted = [...counts].sort((a,b)=>a-b);
+  const avg    = Math.round((counts.reduce((a,b)=>a+b,0)/total)*10)/10;
+  const med    = sorted[Math.floor(sorted.length/2)];
+  const maxVal = Math.max(...counts);
+  const minVal = Math.min(...counts);
+
+  // Overall distribution across all history
+  const bkts = BUCKETS.map(b=>({
+    ...b,
+    count: counts.filter(c=>c>=b.min&&c<=b.max).length,
+    pct:   Math.round((counts.filter(c=>c>=b.min&&c<=b.max).length/total)*100),
+  }));
+
+  // Conditional: games that survived PAST cardsSoFar
+  const survived  = counts.filter(c=>c>cardsSoFar);
+  const survTotal = survived.length;
+  const survivedPct = Math.round((survTotal/total)*100);
+
+  // Conditional bucket distribution — given alive at cardsSoFar, where does it finish?
+  const condBkts = BUCKETS.map(b=>({
+    ...b,
+    count: survived.filter(c=>c>=b.min&&c<=b.max).length,
+    pct:   survTotal>0 ? Math.round((survived.filter(c=>c>=b.min&&c<=b.max).length/survTotal)*100) : 0,
+  }));
+
+  const topBkt  = condBkts.reduce((a,b)=>b.pct>a.pct?b:a, condBkts[0]);
+  const condAvg = survived.length>0
+    ? Math.round((survived.reduce((a,b)=>a+b,0)/survived.length)*10)/10 : null;
+
+  return{avg,med,maxVal,minVal,survivedPct,survTotal,condAvg,bkts,condBkts,topBkt,total};
+}
+
+function calcCardProb(dealtCards,jokerValue){
+  const remaining={...freshDeck()};
+  for(const c of dealtCards){if(remaining[c.value]!==undefined&&remaining[c.value]>0)remaining[c.value]--;}
+  const totalLeft=Object.values(remaining).reduce((a,b)=>a+b,0);
+  if(totalLeft===0)return[];
+  const jokerRemain=jokerValue?remaining[jokerValue]??0:0;
+  return VALUES.map(v=>({
+    value:v,count:remaining[v],
+    prob:totalLeft>0?Math.round((remaining[v]/totalLeft)*1000)/10:0,
+    isJoker:v===jokerValue,
+    jokerMatchProb:jokerValue&&totalLeft>0?Math.round((jokerRemain/totalLeft)*1000)/10:null,
+  })).sort((a,b)=>b.prob-a.prob);
+}
+
+const SectionBox=({title,children,accent})=>(
+  <div style={{background:'#060f1c',border:`1px solid ${accent||'rgba(255,255,255,0.07)'}`,borderRadius:12,padding:'10px 12px',marginBottom:10}}>
+    <div style={{fontSize:10,color:accent||'#8090a0',letterSpacing:3,textAlign:'center',paddingBottom:8,borderBottom:'1px solid rgba(255,255,255,0.06)',marginBottom:8}}>{title}</div>
+    {children}
+  </div>
+);
+
+export default function App(){
+  const [tab,setTab]=useState('baccarat');
+
+  // Baccarat
+  const [sequence,setSequence]=useState(PRESET);
+  const [cardNum,setCardNum]=useState('');
+  const [cardSide,setCardSide]=useState('B');
+  const [cardError,setCardError]=useState('');
+  // Cards Dealt history — just lengths (numbers)
+  const [cdHistory,setCdHistory]=useState([]);
+
+  // Image
+  const [imgLoading,setImgLoading]=useState(false);
+  const [imgMsg,setImgMsg]=useState('');
+  const [dragOver,setDragOver]=useState(false);
+  const [preview,setPreview]=useState(null);
+  const fileRef=useRef();
+
+  // Andar Bahar
+  const [jokerCard,setJokerCard]=useState(null);
+  const [dealtCards,setDealtCards]=useState([]);
+  // rounds history: [{roundNo, jokerValue, openedAt, winSide, cards:[]}]
+  const [abRounds,setAbRounds]=useState([]);
+  const [selValue,setSelValue]=useState('A');
+  const [selSuit,setSelSuit]=useState('♠');
+  const [selSide,setSelSide]=useState('A');
+  // for round entry
+  const [roundOpenedAt,setRoundOpenedAt]=useState('');
+  const [roundWinSide,setRoundWinSide]=useState('A');
+  const [roundJokerVal,setRoundJokerVal]=useState('A');
+  const [roundJokerSuit,setRoundJokerSuit]=useState('♠');
+  const [roundError,setRoundError]=useState('');
+  const [showRoundForm,setShowRoundForm]=useState(false);
+
+  // Baccarat fns
+  const addResult=useCallback(v=>setSequence(s=>[...s,v]),[]);
+  const undo=useCallback(()=>setSequence(s=>s.slice(0,-1)),[]);
+  const resetBacc=useCallback(()=>setSequence([]),[]);
+  const handleCardAdd=()=>{
+    const n=parseInt(cardNum,10);
+    if(!cardNum||isNaN(n)||n<1||n>49){setCardError('1–49 ke beech number dalo');return;}
+    setCdHistory(h=>[...h,n]);
+    setCardNum('');setCardError('');
+  };
+
+  // Image analyze
+  const analyzeImage=async(file)=>{
+    if(!file||!file.type.startsWith('image/')){setImgMsg('❌ Sirf image allowed.');return;}
+    setImgLoading(true);setImgMsg('🔍 Analyze ho rahi hai...');
+    setPreview(URL.createObjectURL(file));
+    try{
+      const base64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
+      const resp=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:file.type||'image/jpeg',data:base64}},
+          {type:'text',text:`Baccarat screen. Blue/teal=Andar(B), red/orange=Bahar(P). Read BIG ROAD left-to-right, top-to-bottom per column. Reply ONLY valid JSON: {"sequence":["B","P",...]} or {"sequence":[],"error":"msg"}`}
+        ]}]})
+      });
+      const data=await resp.json();
+      if(!resp.ok)throw new Error(data?.error?.message||'API error');
+      const text=data.content?.map(i=>i.text||'').join('')||'';
+      const parsed=JSON.parse(text.replace(/```json|```/g,'').trim());
+      if(parsed.error){setImgMsg('❌ '+parsed.error);}
+      else if(parsed.sequence?.length>0){
+        const v=parsed.sequence.filter(x=>x==='B'||x==='P');
+        setSequence(v);setImgMsg(`✅ ${v.length} results loaded!`);
+      }else setImgMsg('⚠️ Data nahi mila.');
+    }catch(e){setImgMsg('❌ '+e.message);}
+    setImgLoading(false);
+    if(fileRef.current)fileRef.current.value='';
+  };
+
+  useEffect(()=>{
+    const h=e=>{const items=e.clipboardData?.items;if(!items)return;for(const it of items){if(it.type.startsWith('image/')){analyzeImage(it.getAsFile());break;}}};
+    window.addEventListener('paste',h);return()=>window.removeEventListener('paste',h);
+  },[]);
+
+  // AB fns
+  const setJoker=()=>setJokerCard({value:selValue,suit:selSuit});
+  const addDealtCard=()=>setDealtCards(d=>[...d,{value:selValue,suit:selSuit,side:selSide,id:Date.now()}]);
+  const resetAB=()=>{setJokerCard(null);setDealtCards([]);};
+  const undoAB=()=>setDealtCards(d=>d.slice(0,-1));
+
+  // Add a completed round to history
+  const addRound=()=>{
+    const n=parseInt(roundOpenedAt,10);
+    if(!roundOpenedAt||isNaN(n)||n<1||n>100){setRoundError('1–100 ke beech dalo');return;}
+    setAbRounds(r=>[...r,{
+      roundNo:r.length+1,
+      jokerValue:roundJokerVal,
+      jokerSuit:roundJokerSuit,
+      openedAt:n,
+      winSide:roundWinSide,
+    }]);
+    setRoundOpenedAt('');setRoundError('');
+  };
+  const removeRound=(idx)=>setAbRounds(r=>r.filter((_,i)=>i!==idx).map((x,i)=>({...x,roundNo:i+1})));
+
+  // Computed
+  const beadGrid=buildBeadGrid(sequence);
+  const bigGrid=buildBigGrid(sequence);
+  const prob=calcProb(sequence);
+  const rec=prob.b>=prob.p?'B':'P';
+  const conf=Math.max(prob.b,prob.p);
+
+  // Cards Dealt computations
+  const cdTotal=cdHistory.length;
+  const cdAvg=cdTotal>0?Math.round((cdHistory.reduce((a,b)=>a+b,0)/cdTotal)*10)/10:0;
+  const cdSorted=[...cdHistory].sort((a,b)=>a-b);
+  const cdMedian=cdTotal>0?cdSorted[Math.floor(cdTotal/2)]:0;
+  const cdMin=cdTotal>0?cdSorted[0]:0;
+  const cdMax=cdTotal>0?cdSorted[cdTotal-1]:0;
+  const cdBuckets=CD_BUCKETS.map(b=>({
+    ...b,
+    count:cdHistory.filter(n=>n>=b.min&&n<=b.max).length,
+    pct:cdTotal>0?Math.round((cdHistory.filter(n=>n>=b.min&&n<=b.max).length/cdTotal)*100):0,
+  }));
+  const cdTopBucket=cdTotal>0?cdBuckets.reduce((a,b)=>b.pct>a.pct?b:a,cdBuckets[0]):null;
+  const cardProbs=calcCardProb(dealtCards,jokerCard?.value);
+  const mult=abMultiplier(dealtCards.length);
+  const andarCards=dealtCards.filter(c=>c.side==='A');
+  const baharCards=dealtCards.filter(c=>c.side==='B');
+  const jokerMatchProb=jokerCard&&cardProbs.length>0?cardProbs.find(c=>c.isJoker)?.prob??0:0;
+  const prediction=buildPrediction(abRounds, dealtCards.length);
+
+  const Cell=({val,filled})=>(
+    <div style={{width:22,height:22,borderRadius:'50%',flexShrink:0,
+      background:val?(filled?(val==='B'?B_COLOR:P_COLOR):'transparent'):'transparent',
+      border:val?`2px solid ${val==='B'?B_COLOR:P_COLOR}`:'1px solid rgba(255,255,255,0.08)',
+      boxShadow:val&&filled?`0 0 5px ${val==='B'?'#0e5a70':'#7a2418'}`:'none',
+    }}/>
+  );
+
+  const CardChip=({value,suit,small})=>(
+    <div style={{display:'inline-flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+      width:small?26:36,height:small?32:46,borderRadius:5,
+      background:'#0d1d30',border:`1.5px solid ${SUIT_COLOR[suit]||'#aaa'}`,
+      fontSize:small?8:11,color:SUIT_COLOR[suit]||'#aaa',fontWeight:700,flexShrink:0,
+    }}>
+      <span style={{fontSize:small?9:13}}>{suit}</span>
+      <span>{value}</span>
+    </div>
+  );
+
+  return(
+    <div style={{minHeight:'100vh',background:'linear-gradient(160deg,#07111e,#0c1a2e)',fontFamily:'system-ui,sans-serif',color:'#dde8f0'}}>
+
+      {/* Header */}
+      <div style={{background:'#0a1828',borderBottom:'1px solid rgba(255,255,255,0.07)',padding:'11px 14px',display:'flex',alignItems:'center',gap:10}}>
+        <div style={{width:34,height:34,borderRadius:8,background:'linear-gradient(135deg,#b08010,#e0b840)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>🎰</div>
+        <div>
+          <div style={{fontSize:14,fontWeight:700,letterSpacing:2,color:'#dfc050'}}>CARD ANALYZER</div>
+          <div style={{fontSize:8,color:'#4a7090',letterSpacing:3}}>ANDAR BAHAR · BACCARAT</div>
+        </div>
+        <div style={{marginLeft:'auto',textAlign:'right'}}>
+          <div style={{fontSize:8,color:'#4a7090'}}>{tab==='baccarat'?'ROUNDS':'CARDS'}</div>
+          <div style={{fontSize:18,fontWeight:700,color:'#dfc050'}}>{tab==='baccarat'?sequence.length:dealtCards.length}</div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:'flex',background:'#050e1a',borderBottom:'1px solid rgba(255,255,255,0.07)'}}>
+        {[['baccarat','🎴 Baccarat'],['ab','🃏 Andar Bahar']].map(([k,lb])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:'10px 0',fontSize:12,fontWeight:700,cursor:'pointer',border:'none',background:'transparent',letterSpacing:1,color:tab===k?'#dfc050':'#3a6080',borderBottom:tab===k?'2px solid #dfc050':'2px solid transparent',transition:'all 0.2s'}}>{lb}</button>
+        ))}
+      </div>
+
+      <div style={{padding:'12px 12px 24px',maxWidth:640,margin:'0 auto'}}>
+
+      {/* ══════════ BACCARAT TAB ══════════ */}
+      {tab==='baccarat'&&(<>
+
+        {/* Image Upload — compact */}
+        <div style={{background:'#060f1c',border:'1px solid rgba(255,255,255,0.07)',borderRadius:10,padding:'8px 10px',marginBottom:10}}>
+          <div
+            onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+            onDragLeave={e=>{e.preventDefault();setDragOver(false);}}
+            onDrop={e=>{e.preventDefault();setDragOver(false);analyzeImage(e.dataTransfer.files?.[0]);}}
+            onClick={()=>!imgLoading&&fileRef.current?.click()}
+            style={{
+              display:'flex',alignItems:'center',gap:10,
+              border:`1.5px dashed ${dragOver?B_COLOR:'rgba(255,255,255,0.12)'}`,
+              borderRadius:8,padding:'8px 12px',cursor:imgLoading?'not-allowed':'pointer',
+              background:dragOver?'rgba(26,159,190,0.06)':'#071520',transition:'all 0.2s',
+            }}
+          >
+            <input ref={fileRef} type="file" accept="image/*" style={{display:'none'}} onChange={e=>analyzeImage(e.target.files?.[0])} disabled={imgLoading}/>
+            {preview&&!imgLoading&&<img src={preview} alt="" style={{width:36,height:36,objectFit:'cover',borderRadius:5,border:'1px solid rgba(255,255,255,0.1)',flexShrink:0}}/>}
+            {!preview&&<span style={{fontSize:18}}>{imgLoading?'⏳':'🖼️'}</span>}
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:11,fontWeight:700,color:imgLoading?'#4ab8d8':'#6a9ab8'}}>
+                {imgLoading?'AI analyze kar raha hai...':'Screenshot upload / drop / paste karo'}
+              </div>
+              <div style={{fontSize:9,color:'#2a4a60',marginTop:1}}>
+                Click · Drag & Drop · <kbd style={{background:'rgba(255,255,255,0.07)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:3,padding:'0 4px',fontSize:8}}>Ctrl+V</kbd>
+              </div>
+            </div>
+            <div style={{fontSize:9,color:'#2a5070',flexShrink:0}}>📷 AUTO<br/>FILL</div>
+          </div>
+          {imgMsg&&<div style={{marginTop:6,padding:'5px 9px',borderRadius:7,background:imgMsg.startsWith('✅')?'#0a2a18':imgMsg.startsWith('❌')?'#2a0a08':'#0d1d30',border:`1px solid ${imgMsg.startsWith('✅')?'#2a7a48':imgMsg.startsWith('❌')?'#7a2818':'#1a3050'}`,fontSize:10,color:imgMsg.startsWith('✅')?'#50d888':imgMsg.startsWith('❌')?'#e07060':'#8ab8d8'}}>{imgMsg}</div>}
+        </div>
+
+        {/* Probability */}
+        <div style={{background:'#0d1d30',border:'1px solid rgba(255,255,255,0.07)',borderRadius:13,padding:'13px 15px',marginBottom:10}}>
+          <div style={{fontSize:9,color:'#4a7090',letterSpacing:3,marginBottom:11}}>NEXT ROUND — PROBABILITY</div>
+          {[['B','ANDAR (Blue)',B_COLOR],['P','BAHAR (Red)',P_COLOR]].map(([side,label,color])=>{
+            const pct=side==='B'?prob.b:prob.p;
+            return(<div key={side} style={{marginBottom:side==='B'?10:13}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:5}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <div style={{width:11,height:11,borderRadius:'50%',background:color}}/>
+                  <span style={{fontSize:11,fontWeight:600,color:'#b0c8d8'}}>{label}</span>
+                </div>
+                <span style={{fontSize:20,fontWeight:800,color}}>{sequence.length>=3?pct+'%':'—'}</span>
+              </div>
+              <div style={{height:6,background:'#060f1a',borderRadius:3,overflow:'hidden'}}>
+                <div style={{height:'100%',width:sequence.length>=3?pct+'%':'50%',background:color,borderRadius:3,transition:'width 0.5s ease'}}/>
+              </div>
+            </div>);
+          })}
+          {sequence.length>=5&&(
+            <div style={{background:rec==='B'?'#071c2c':'#220d08',border:`1.5px solid ${rec==='B'?B_COLOR:P_COLOR}`,borderRadius:10,padding:'9px 13px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <div>
+                <div style={{fontSize:8,color:'#4a7090',letterSpacing:2}}>SUGGESTED BET</div>
+                <div style={{fontSize:16,fontWeight:800,color:rec==='B'?B_COLOR:P_COLOR,marginTop:2}}>{rec==='B'?'🔵 ANDAR':'🔴 BAHAR'}</div>
+                {prob.streakLen>=3&&<div style={{fontSize:9,color:'#6a9878',marginTop:2}}>{prob.streakLen} streak — reversal likely</div>}
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:8,color:'#4a7090',letterSpacing:2}}>CONFIDENCE</div>
+                <div style={{fontSize:22,fontWeight:800,color:'#dfc050'}}>{conf}%</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Stats */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginBottom:10}}>
+          {[{label:'ANDAR WINS',val:prob.bCount??0,color:B_COLOR},{label:'BAHAR WINS',val:prob.pCount??0,color:P_COLOR},{label:'STREAK',val:prob.streakLen>=1?`${prob.streakLen}× ${prob.streak==='B'?'🔵':'🔴'}`:'—',color:'#dfc050'}].map((s,i)=>(
+            <div key={i} style={{background:'#0d1d30',border:'1px solid rgba(255,255,255,0.07)',borderRadius:9,padding:'8px 6px',textAlign:'center'}}>
+              <div style={{fontSize:8,color:'#4a7090',letterSpacing:1}}>{s.label}</div>
+              <div style={{fontSize:15,fontWeight:700,color:s.color,marginTop:2}}>{s.val}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Buttons */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:7}}>
+          {[['B','🔵 ANDAR JITA',B_COLOR,'#071c2c'],['P','🔴 BAHAR JITA',P_COLOR,'#220d08']].map(([v,lb,c,bg])=>(
+            <button key={v} onClick={()=>addResult(v)} style={{padding:'13px 8px',borderRadius:10,border:`1.5px solid ${c}`,background:bg,color:c,fontSize:13,fontWeight:800,cursor:'pointer'}}>{lb}</button>
+          ))}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:10}}>
+          {[['↩ Undo',undo],['🔄 Reset',resetBacc]].map(([lb,fn])=>(
+            <button key={lb} onClick={fn} style={{padding:'8px',borderRadius:8,border:'1px solid rgba(255,255,255,0.1)',background:'#0d1d30',color:'#5a80a0',fontSize:11,fontWeight:600,cursor:'pointer'}}>{lb}</button>
+          ))}
+        </div>
+
+        {/* Bead Road */}
+        <SectionBox title="BEAD ROAD">
+          <div style={{overflowX:'auto'}}>
+            <div style={{display:'flex',flexDirection:'column',gap:2}}>
+              {beadGrid.map((row,r)=>(
+                <div key={r} style={{display:'flex',gap:2}}>
+                  {row.map((val,c)=><Cell key={c} val={val} filled={true}/>)}
+                </div>
+              ))}
+            </div>
+          </div>
+        </SectionBox>
+
+        {/* Big Road */}
+        <SectionBox title="BIG ROAD">
+          <div style={{overflowX:'auto'}}>
+            <div style={{display:'flex',flexDirection:'column',gap:2}}>
+              {bigGrid.map((row,r)=>(
+                <div key={r} style={{display:'flex',gap:2}}>
+                  {row.map((val,c)=><Cell key={c} val={val} filled={false}/>)}
+                </div>
+              ))}
+            </div>
+          </div>
+        </SectionBox>
+
+        {/* Cards Dealt — length tracker + bucket prediction */}
+        <SectionBox title="CARDS DEALT — KITNA LAMBA GAYA?">
+
+          {/* Quick number buttons + custom input */}
+          <div style={{marginBottom:10}}>
+            <div style={{fontSize:9,color:'#4a7090',letterSpacing:2,marginBottom:7}}>
+              IS ROUND MEIN CARD KITNE NUMBER PAR KHULA?
+            </div>
+            {/* Quick tap buttons 1–20 */}
+            <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:8}}>
+              {[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20].map(n=>(
+                <button key={n} onClick={()=>setCardNum(String(n))}
+                  style={{
+                    width:34,height:30,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer',
+                    border:`1.5px solid ${cardNum===String(n)?'#4ab8d8':'rgba(255,255,255,0.1)'}`,
+                    background:cardNum===String(n)?'rgba(74,184,216,0.15)':'rgba(255,255,255,0.03)',
+                    color:cardNum===String(n)?'#4ab8d8':'#6a8aa8',
+                  }}>{n}</button>
+              ))}
+            </div>
+            {/* More quick buttons 21–49 */}
+            <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:8}}>
+              {[21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49].map(n=>(
+                <button key={n} onClick={()=>setCardNum(String(n))}
+                  style={{
+                    width:34,height:30,borderRadius:6,fontSize:10,fontWeight:700,cursor:'pointer',
+                    border:`1.5px solid ${cardNum===String(n)?'#dfc050':'rgba(255,255,255,0.07)'}`,
+                    background:cardNum===String(n)?'rgba(223,192,80,0.12)':'rgba(255,255,255,0.02)',
+                    color:cardNum===String(n)?'#dfc050':'#5a7a90',
+                  }}>{n}</button>
+              ))}
+            </div>
+            {/* Custom + Add row */}
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <input
+                type="number" min="1" max="49" placeholder="Ya khud likho..."
+                value={cardNum}
+                onChange={e=>{setCardNum(e.target.value);setCardError('');}}
+                onKeyDown={e=>e.key==='Enter'&&handleCardAdd()}
+                style={{flex:1,padding:'7px 10px',borderRadius:7,border:'1px solid rgba(255,255,255,0.14)',background:'#071020',color:'#dde8f0',fontSize:12,outline:'none'}}
+              />
+              <button onClick={handleCardAdd}
+                style={{padding:'7px 18px',borderRadius:7,border:'1.5px solid #4ab8d8',background:'rgba(74,184,216,0.12)',color:'#4ab8d8',fontSize:12,fontWeight:800,cursor:'pointer'}}>
+                + Add
+              </button>
+            </div>
+            {cardError&&<div style={{fontSize:10,color:'#e07060',marginTop:5}}>⚠️ {cardError}</div>}
+          </div>
+
+          {/* History chips */}
+          {cdHistory.length>0&&(
+            <div style={{marginBottom:10}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                <div style={{fontSize:9,color:'#4a7090',letterSpacing:2}}>HISTORY ({cdHistory.length} rounds)</div>
+                <button onClick={()=>setCdHistory([])} style={{fontSize:9,color:'#3a5060',background:'transparent',border:'none',cursor:'pointer'}}>Clear all</button>
+              </div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                {cdHistory.map((n,i)=>{
+                  const bkt=CD_BUCKETS.find(b=>n>=b.min&&n<=b.max)||CD_BUCKETS[CD_BUCKETS.length-1];
+                  return(
+                    <div key={i} onClick={()=>setCdHistory(h=>h.filter((_,j)=>j!==i))}
+                      title="Click to remove"
+                      style={{
+                        width:36,height:36,borderRadius:8,flexShrink:0,
+                        display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+                        border:`1.5px solid ${bkt.color}88`,background:`${bkt.color}15`,
+                        cursor:'pointer',fontSize:10,fontWeight:700,color:bkt.color,
+                      }}>
+                      <span style={{fontSize:13}}>{n}</span>
+                      <span style={{fontSize:7,color:`${bkt.color}99`}}>#{i+1}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Bucket prediction */}
+          {cdHistory.length>=1&&(
+            <div style={{background:'rgba(74,184,216,0.04)',border:'1px solid rgba(74,184,216,0.15)',borderRadius:11,padding:'12px 12px'}}>
+              <div style={{fontSize:9,color:'#4ab8d8',letterSpacing:2,marginBottom:10}}>
+                📊 PREDICTION — AGLA CARD KAHAN GIREGA?
+              </div>
+
+              {/* Summary stats */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:5,marginBottom:10}}>
+                {[
+                  {lbl:'AVERAGE',val:cdAvg+'',c:'#4ab8d8'},
+                  {lbl:'MEDIAN',val:cdMedian+'',c:'#dfc050'},
+                  {lbl:'RANGE',val:`${cdMin}–${cdMax}`,c:'#8090a0'},
+                ].map((s,i)=>(
+                  <div key={i} style={{background:'#071520',borderRadius:7,padding:'7px 5px',textAlign:'center'}}>
+                    <div style={{fontSize:7,color:'#2a5060',letterSpacing:1}}>{s.lbl}</div>
+                    <div style={{fontSize:13,fontWeight:700,color:s.c,marginTop:2}}>{s.val}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* All 10 buckets */}
+              <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                {cdBuckets.map((bkt,i)=>(
+                  <div key={i} style={{
+                    borderRadius:8,padding:'7px 10px',
+                    border:`1px solid ${bkt.pct>=20?bkt.color+'60':'rgba(255,255,255,0.06)'}`,
+                    background:bkt.pct>=20?`${bkt.color}10`:'rgba(255,255,255,0.02)',
+                  }}>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:5}}>
+                      <div style={{display:'flex',alignItems:'center',gap:7}}>
+                        <div style={{
+                          width:44,height:18,borderRadius:4,
+                          background:`${bkt.color}20`,border:`1px solid ${bkt.color}60`,
+                          display:'flex',alignItems:'center',justifyContent:'center',
+                          fontSize:9,fontWeight:800,color:bkt.color,flexShrink:0,
+                        }}>{bkt.label}</div>
+                        <span style={{fontSize:9,color:'#3a5870'}}>{bkt.count}/{cdHistory.length} rounds</span>
+                      </div>
+                      <span style={{
+                        fontSize:16,fontWeight:800,minWidth:42,textAlign:'right',
+                        color:bkt.pct>=25?'#e07040':bkt.pct>=15?'#dfc050':bkt.pct>=5?'#50c888':'#3a5870',
+                      }}>{bkt.pct}%</span>
+                    </div>
+                    <div style={{height:8,background:'#050e18',borderRadius:4,overflow:'hidden'}}>
+                      <div style={{
+                        height:'100%',width:`${bkt.pct}%`,borderRadius:4,
+                        background:`linear-gradient(90deg,${bkt.color}70,${bkt.color})`,
+                        transition:'width 0.5s ease',
+                      }}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top insight */}
+              {cdTopBucket&&(
+                <div style={{marginTop:10,padding:'9px 11px',borderRadius:8,background:'rgba(255,255,255,0.03)',border:'1px solid rgba(255,255,255,0.08)',fontSize:11,color:'#8ab8d0',lineHeight:1.6}}>
+                  💡 Sabse zyada chance: <strong style={{color:cdTopBucket.color}}>{cdTopBucket.label} ({cdTopBucket.pct}%)</strong>
+                  {' '}— {cdHistory.length} rounds ki history se
+                </div>
+              )}
+            </div>
+          )}
+
+          {cdHistory.length===0&&(
+            <div style={{textAlign:'center',padding:'16px',fontSize:11,color:'#2a4050'}}>
+              Upar number buttons ya input se rounds add karo
+            </div>
+          )}
+
+        </SectionBox>
+
+        <div style={{background:'#060f1c',border:'1px solid rgba(255,255,255,0.04)',borderRadius:9,padding:'8px 10px',fontSize:9,color:'#3a5870',lineHeight:1.6,textAlign:'center'}}>
+          Math: frequency + streak regression + alternation. ⚠️ Random game — koi guarantee nahi.
+        </div>
+      </>)}
+
+
+      {/* ══════════ ANDAR BAHAR TAB ══════════ */}
+      {tab==='ab'&&(<>
+
+        {/* Joker Card */}
+        <SectionBox title="🃏 JOKER CARD SET KARO" accent="#dfc050">
+          <div style={{display:'flex',flexWrap:'wrap',gap:3,marginBottom:7}}>
+            {VALUES.map(v=>(
+              <button key={v} onClick={()=>setSelValue(v)} style={{width:32,height:32,borderRadius:6,border:`1.5px solid ${selValue===v?'#dfc050':'rgba(255,255,255,0.1)'}`,background:selValue===v?'rgba(223,192,80,0.12)':'rgba(255,255,255,0.03)',color:selValue===v?'#dfc050':'#6a8aa8',fontSize:10,fontWeight:700,cursor:'pointer'}}>{v}</button>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:5,marginBottom:9}}>
+            {SUITS.map(s=>(
+              <button key={s} onClick={()=>setSelSuit(s)} style={{flex:1,padding:'6px 0',borderRadius:7,border:`1.5px solid ${selSuit===s?SUIT_COLOR[s]:'rgba(255,255,255,0.08)'}`,background:selSuit===s?'rgba(255,255,255,0.05)':'transparent',color:SUIT_COLOR[s],fontSize:15,cursor:'pointer'}}>{s}</button>
+            ))}
+          </div>
+          <button onClick={setJoker} style={{width:'100%',padding:'10px',borderRadius:8,border:'1.5px solid #dfc050',background:'rgba(223,192,80,0.1)',color:'#dfc050',fontSize:12,fontWeight:800,cursor:'pointer'}}>🃏 Joker Set Karo: {selValue}{selSuit}</button>
+          {jokerCard&&(
+            <div style={{display:'flex',alignItems:'center',gap:10,marginTop:9,padding:'9px 12px',borderRadius:8,background:'rgba(223,192,80,0.07)',border:'1px solid rgba(223,192,80,0.25)'}}>
+              <CardChip value={jokerCard.value} suit={jokerCard.suit}/>
+              <div>
+                <div style={{fontSize:8,color:'#8a9ab0',letterSpacing:1}}>CURRENT JOKER</div>
+                <div style={{fontSize:15,fontWeight:800,color:'#dfc050'}}>{jokerCard.value} {jokerCard.suit}</div>
+                <div style={{fontSize:9,color:'#5a7888'}}>Is value ka card aane pe game khatam</div>
+              </div>
+            </div>
+          )}
+        </SectionBox>
+
+        {/* ── ROUND HISTORY — main feature ── */}
+        <SectionBox title="📋 ROUND HISTORY — KAB Kितना KHULA" accent="#4ab8d8">
+          <div style={{fontSize:10,color:'#4a7090',lineHeight:1.6,marginBottom:10,padding:'7px 9px',borderRadius:8,background:'rgba(74,184,216,0.05)',border:'1px solid rgba(74,184,216,0.15)'}}>
+            Har round ka data dalo — Joker card kaunsa tha, kitne cards pe khula, aur kaun jita.<br/>
+            Is history se app predict karega ki <strong style={{color:'#4ab8d8'}}>aage wala game kitne cards tak ja sakta hai.</strong>
+          </div>
+
+          {/* Add round toggle */}
+          <button onClick={()=>setShowRoundForm(v=>!v)} style={{width:'100%',padding:'9px',borderRadius:8,border:'1.5px solid rgba(74,184,216,0.4)',background:showRoundForm?'rgba(74,184,216,0.1)':'rgba(74,184,216,0.05)',color:'#4ab8d8',fontSize:11,fontWeight:700,cursor:'pointer',marginBottom:8}}>
+            {showRoundForm?'▲ Form Band Karo':'▼ + Naya Round Add Karo'}
+          </button>
+
+          {showRoundForm&&(
+            <div style={{background:'#07141e',borderRadius:9,border:'1px solid rgba(255,255,255,0.07)',padding:'11px',marginBottom:10}}>
+              {/* Joker for this round */}
+              <div style={{fontSize:9,color:'#4a7090',letterSpacing:1,marginBottom:6}}>IS ROUND KA JOKER CARD</div>
+              <div style={{display:'flex',gap:3,flexWrap:'wrap',marginBottom:5}}>
+                {VALUES.map(v=>(
+                  <button key={v} onClick={()=>setRoundJokerVal(v)} style={{width:29,height:29,borderRadius:5,border:`1.5px solid ${roundJokerVal===v?'#dfc050':'rgba(255,255,255,0.09)'}`,background:roundJokerVal===v?'rgba(223,192,80,0.12)':'transparent',color:roundJokerVal===v?'#dfc050':'#5a7a90',fontSize:9,fontWeight:700,cursor:'pointer'}}>{v}</button>
+                ))}
+              </div>
+              <div style={{display:'flex',gap:4,marginBottom:10}}>
+                {SUITS.map(s=>(
+                  <button key={s} onClick={()=>setRoundJokerSuit(s)} style={{flex:1,padding:'5px 0',borderRadius:6,border:`1.5px solid ${roundJokerSuit===s?SUIT_COLOR[s]:'rgba(255,255,255,0.07)'}`,background:'transparent',color:SUIT_COLOR[s],fontSize:13,cursor:'pointer'}}>{s}</button>
+                ))}
+              </div>
+
+              {/* Opened at */}
+              <div style={{fontSize:9,color:'#4a7090',letterSpacing:1,marginBottom:5}}>KITNE CARDS PE KHULA (kitne cards baad match hua)</div>
+              <div style={{display:'flex',gap:6,marginBottom:8}}>
+                {[1,2,3,4,5,6,8,10,12,15,20,25].map(n=>(
+                  <button key={n} onClick={()=>setRoundOpenedAt(String(n))} style={{width:30,height:28,borderRadius:5,border:`1.5px solid ${roundOpenedAt===String(n)?'#4ab8d8':'rgba(255,255,255,0.09)'}`,background:roundOpenedAt===String(n)?'rgba(74,184,216,0.15)':'transparent',color:roundOpenedAt===String(n)?'#4ab8d8':'#5a7a90',fontSize:9,fontWeight:700,cursor:'pointer',flexShrink:0}}>{n}</button>
+                ))}
+                <input type="number" min="1" max="100" placeholder="Custom" value={roundOpenedAt} onChange={e=>setRoundOpenedAt(e.target.value)} style={{width:60,padding:'4px 7px',borderRadius:6,border:'1px solid rgba(255,255,255,0.12)',background:'#071020',color:'#dde8f0',fontSize:10,outline:'none'}}/>
+              </div>
+
+              {/* Win side */}
+              <div style={{fontSize:9,color:'#4a7090',letterSpacing:1,marginBottom:5}}>KAUN JITA</div>
+              <div style={{display:'flex',gap:6,marginBottom:10}}>
+                {[['A','🟢 Andar','#1a8a40','#0a2018'],['B','🔴 Bahar','#c84030','#220d08']].map(([v,lb,c,bg])=>(
+                  <button key={v} onClick={()=>setRoundWinSide(v)} style={{flex:1,padding:'7px',borderRadius:7,border:`1.5px solid ${roundWinSide===v?c:'rgba(255,255,255,0.09)'}`,background:roundWinSide===v?bg:'transparent',color:c,fontSize:11,fontWeight:700,cursor:'pointer',opacity:roundWinSide===v?1:0.5}}>{lb}</button>
+                ))}
+              </div>
+
+              {roundError&&<div style={{fontSize:10,color:'#e07060',marginBottom:6}}>⚠️ {roundError}</div>}
+              <button onClick={addRound} style={{width:'100%',padding:'10px',borderRadius:8,border:'1.5px solid #4ab8d8',background:'rgba(74,184,216,0.1)',color:'#4ab8d8',fontSize:12,fontWeight:800,cursor:'pointer'}}>
+                ✅ Round #{abRounds.length+1} Save Karo
+              </button>
+            </div>
+          )}
+
+          {/* Rounds list */}
+          {abRounds.length>0&&(
+            <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:10}}>
+              {abRounds.map((round,i)=>{
+                const m=abMultiplier(round.openedAt);
+                const bkt=BUCKETS.find(b=>round.openedAt>=b.min&&round.openedAt<=b.max)||BUCKETS[BUCKETS.length-1];
+                return(
+                  <div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',borderRadius:8,background:'rgba(255,255,255,0.02)',border:'1px solid rgba(255,255,255,0.06)'}}>
+                    <div style={{width:24,height:24,borderRadius:'50%',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,color:'#5a80a0',flexShrink:0,fontWeight:700}}>#{round.roundNo}</div>
+                    <CardChip value={round.jokerValue} suit={round.jokerSuit} small/>
+                    <div style={{flex:1}}>
+                      <div style={{display:'flex',alignItems:'center',gap:5}}>
+                        <span style={{fontSize:10,color:'#8ab8d0'}}>
+                          <strong style={{color:'#dde8f0'}}>{round.openedAt}</strong> pe khula
+                        </span>
+                        <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:bkt.color+'22',color:bkt.color,fontWeight:700,border:`1px solid ${bkt.color}55`}}>{bkt.label}</span>
+                        <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:round.winSide==='A'?'#0a2018':'#220d08',color:round.winSide==='A'?'#40c870':'#e06050',fontWeight:700}}>{round.winSide==='A'?'Andar':'Bahar'}</span>
+                      </div>
+                      <div style={{fontSize:9,color:m.color,marginTop:1}}>{m.label} · {m.min}×–{m.max}×</div>
+                    </div>
+                    <button onClick={()=>removeRound(i)} style={{background:'transparent',border:'none',color:'#3a5060',fontSize:14,cursor:'pointer',padding:'2px 4px'}}>✕</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── BUCKET PREDICTION ── */}
+          {prediction&&abRounds.length>=1&&(
+            <div style={{background:'rgba(74,184,216,0.05)',border:'1px solid rgba(74,184,216,0.18)',borderRadius:11,padding:'12px 13px'}}>
+
+              {/* Header stats */}
+              <div style={{fontSize:9,color:'#4ab8d8',letterSpacing:2,marginBottom:9}}>
+                📈 PREDICTION — AB YE GAME KITNA AAGE JAYEGA?
+              </div>
+
+              {/* Current cards status */}
+              <div style={{
+                display:'flex',alignItems:'center',justifyContent:'space-between',
+                padding:'8px 11px',borderRadius:8,
+                background:'rgba(223,192,80,0.07)',border:'1px solid rgba(223,192,80,0.2)',
+                marginBottom:10,
+              }}>
+                <div>
+                  <div style={{fontSize:8,color:'#8a9070',letterSpacing:1}}>ABHI TAK KHULE</div>
+                  <div style={{fontSize:22,fontWeight:800,color:'#dfc050'}}>{dealtCards.length} cards</div>
+                </div>
+                {prediction.condAvg&&(
+                  <div style={{textAlign:'right'}}>
+                    <div style={{fontSize:8,color:'#8a9070',letterSpacing:1}}>EXPECTED END</div>
+                    <div style={{fontSize:22,fontWeight:800,color:'#4ab8d8'}}>{prediction.condAvg}</div>
+                    <div style={{fontSize:8,color:'#3a6070'}}>avg (surviving games)</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Summary row */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:5,marginBottom:10}}>
+                {[
+                  {lbl:'TOTAL ROUNDS',val:prediction.total,c:'#8ab8d0'},
+                  {lbl:'SURVIVED',val:prediction.survTotal,c:'#4ab8d8'},
+                  {lbl:'AVG (all)',val:prediction.avg,c:'#dfc050'},
+                  {lbl:'RANGE',val:`${prediction.minVal}–${prediction.maxVal}`,c:'#8090a0'},
+                ].map((s,i)=>(
+                  <div key={i} style={{background:'#071520',borderRadius:7,padding:'6px 4px',textAlign:'center'}}>
+                    <div style={{fontSize:7,color:'#3a5a70',letterSpacing:1}}>{s.lbl}</div>
+                    <div style={{fontSize:12,fontWeight:700,color:s.c,marginTop:2}}>{s.val}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Main bucket bars — conditional (given survived past current count) */}
+              <div style={{fontSize:9,color:'#3a6070',marginBottom:6}}>
+                {dealtCards.length>0
+                  ? `${prediction.survivedPct}% games yahan tak pahunche — unme se aage kahan gaye:`
+                  : 'Sabhi rounds ki distribution:'}
+              </div>
+
+              <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                {(dealtCards.length>0 ? prediction.condBkts : prediction.bkts).map((bkt,i)=>{
+                  const isCurrentZone = dealtCards.length>=bkt.min && dealtCards.length<=bkt.max;
+                  const isPast = bkt.max < dealtCards.length;
+                  return(
+                    <div key={i} style={{
+                      borderRadius:8,
+                      border:`1px solid ${isCurrentZone?bkt.color+'80':isPast?'rgba(255,255,255,0.04)':'rgba(255,255,255,0.06)'}`,
+                      background: isCurrentZone?bkt.color+'10':isPast?'rgba(255,255,255,0.01)':'rgba(255,255,255,0.02)',
+                      padding:'7px 10px',
+                      opacity: isPast ? 0.4 : 1,
+                    }}>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:5}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
+                          <div style={{
+                            width:36,height:18,borderRadius:4,
+                            background:isPast?'rgba(255,255,255,0.05)':bkt.color+'25',
+                            border:`1px solid ${isPast?'rgba(255,255,255,0.08)':bkt.color+'60'}`,
+                            display:'flex',alignItems:'center',justifyContent:'center',
+                            fontSize:8,fontWeight:800,
+                            color:isPast?'#3a5060':bkt.color,
+                          }}>{bkt.label}</div>
+                          {isCurrentZone&&<span style={{fontSize:8,color:bkt.color,fontWeight:700}}>◀ ABHI YE ZONE</span>}
+                          {isPast&&<span style={{fontSize:8,color:'#2a4050'}}>✓ guzar gaya</span>}
+                        </div>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
+                          <span style={{fontSize:9,color:'#3a5070'}}>{bkt.count}/{prediction.survTotal||prediction.total}</span>
+                          <span style={{
+                            fontSize:15,fontWeight:800,
+                            color:isPast?'#2a4050':bkt.pct>=30?'#e07040':bkt.pct>=15?'#dfc050':bkt.pct>=5?'#50c888':'#4a7090',
+                            minWidth:38,textAlign:'right',
+                          }}>{bkt.pct}%</span>
+                        </div>
+                      </div>
+                      <div style={{height:7,background:'#050e18',borderRadius:4,overflow:'hidden'}}>
+                        <div style={{
+                          height:'100%',
+                          width:`${bkt.pct}%`,
+                          background: isPast ? '#1a2a3a' : `linear-gradient(90deg,${bkt.color}88,${bkt.color})`,
+                          borderRadius:4,
+                          transition:'width 0.5s ease',
+                        }}/>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Smart insight */}
+              {prediction.topBkt&&prediction.survTotal>0&&(
+                <div style={{marginTop:10,padding:'9px 11px',borderRadius:8,background:'rgba(255,255,255,0.03)',border:'1px solid rgba(255,255,255,0.07)',fontSize:10,color:'#8ab8d0',lineHeight:1.6}}>
+                  💡 <strong style={{color:prediction.topBkt.color}}>
+                    {prediction.topBkt.pct}% games {prediction.topBkt.label} cards pe khatam hue
+                  </strong>
+                  {dealtCards.length>0&&prediction.condAvg
+                    ? ` — ${dealtCards.length} cards deal ho chuke hain, average ${prediction.condAvg} cards tak jaata hai.`
+                    : ` — yahi sabse zyada likely range hai.`
+                  }
+                </div>
+              )}
+              {abRounds.length<3&&(
+                <div style={{marginTop:8,fontSize:9,color:'#2a4050',textAlign:'center'}}>
+                  Zyada accurate prediction ke liye aur rounds add karo (abhi: {abRounds.length})
+                </div>
+              )}
+            </div>
+          )}
+          {abRounds.length===0&&(
+            <div style={{textAlign:'center',fontSize:10,color:'#3a5060',padding:'14px'}}>
+              Koi round nahi — upar "+ Naya Round" karke data bharo
+            </div>
+          )}
+        </SectionBox>
+
+        {/* Multiplier status (live game) */}
+        {dealtCards.length>0&&(
+          <div style={{background:'#0a1a28',border:'1px solid rgba(255,255,255,0.07)',borderRadius:11,padding:'11px 13px',marginBottom:10}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:7}}>
+              <div>
+                <div style={{fontSize:8,color:'#4a7090',letterSpacing:2}}>CURRENT ZONE</div>
+                <div style={{fontSize:15,fontWeight:800,color:mult.color,marginTop:1}}>{mult.label}</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:8,color:'#4a7090'}}>CARDS DEALT</div>
+                <div style={{fontSize:24,fontWeight:800,color:'#dfc050'}}>{dealtCards.length}</div>
+              </div>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:7}}>
+              <div style={{background:'#071520',borderRadius:7,padding:'7px',textAlign:'center'}}><div style={{fontSize:8,color:'#3a6080'}}>MIN MULT</div><div style={{fontSize:18,fontWeight:800,color:'#50c888'}}>{mult.min}×</div></div>
+              <div style={{background:'#071520',borderRadius:7,padding:'7px',textAlign:'center'}}><div style={{fontSize:8,color:'#3a6080'}}>MAX MULT</div><div style={{fontSize:18,fontWeight:800,color:'#e07040'}}>{mult.max}×</div></div>
+            </div>
+            <div style={{height:5,background:'#050e18',borderRadius:3,overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${Math.min(100,(dealtCards.length/30)*100)}%`,background:'linear-gradient(90deg,#50c888,#dfc050,#e07040)',borderRadius:3,transition:'width 0.4s'}}/>
+            </div>
+            {jokerCard&&<div style={{marginTop:7,padding:'6px 9px',borderRadius:7,background:'rgba(26,159,190,0.07)',border:'1px solid rgba(26,159,190,0.2)',fontSize:10}}><span style={{color:'#4a7090'}}>Joker match chance: </span><span style={{fontWeight:800,color:jokerMatchProb>20?'#e07040':jokerMatchProb>10?'#dfc050':'#50c888',fontSize:13}}>{jokerMatchProb}%</span></div>}
+          </div>
+        )}
+
+        {/* Card entry */}
+        <SectionBox title="🃏 LIVE CARD ENTER KARO" accent={B_COLOR}>
+          <div style={{display:'flex',flexWrap:'wrap',gap:3,marginBottom:6}}>
+            {VALUES.map(v=>(
+              <button key={v} onClick={()=>setSelValue(v)} style={{width:31,height:31,borderRadius:6,border:`1.5px solid ${selValue===v?'#4ab8d8':'rgba(255,255,255,0.09)'}`,background:selValue===v?'rgba(74,184,216,0.12)':'rgba(255,255,255,0.03)',color:selValue===v?'#4ab8d8':'#6a8aa8',fontSize:10,fontWeight:700,cursor:'pointer'}}>{v}</button>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:4,marginBottom:7}}>
+            {SUITS.map(s=>(
+              <button key={s} onClick={()=>setSelSuit(s)} style={{flex:1,padding:'5px 0',borderRadius:6,border:`1.5px solid ${selSuit===s?SUIT_COLOR[s]:'rgba(255,255,255,0.07)'}`,background:selSuit===s?'rgba(255,255,255,0.05)':'transparent',color:SUIT_COLOR[s],fontSize:14,cursor:'pointer'}}>{s}</button>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:5,marginBottom:9}}>
+            {[['A','🟢 Andar','#1a8a40','#0a2018'],['B','🔴 Bahar','#c84030','#220d08']].map(([v,lb,c,bg])=>(
+              <button key={v} onClick={()=>setSelSide(v)} style={{flex:1,padding:'7px',borderRadius:7,border:`1.5px solid ${selSide===v?c:'rgba(255,255,255,0.09)'}`,background:selSide===v?bg:'transparent',color:c,fontSize:11,fontWeight:700,cursor:'pointer',opacity:selSide===v?1:0.5}}>{lb}</button>
+            ))}
+          </div>
+          <button onClick={addDealtCard} style={{width:'100%',padding:'10px',borderRadius:8,border:`1.5px solid ${selSide==='A'?'#1a8a40':'#c84030'}`,background:selSide==='A'?'#0a2018':'#220d08',color:selSide==='A'?'#40c870':'#e06050',fontSize:12,fontWeight:800,cursor:'pointer'}}>
+            + {selValue}{selSuit} → {selSide==='A'?'Andar':'Bahar'}
+          </button>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:5,marginTop:7}}>
+            {[['↩ Undo',undoAB],['🔄 Reset',resetAB]].map(([lb,fn])=>(
+              <button key={lb} onClick={fn} style={{padding:'7px',borderRadius:7,border:'1px solid rgba(255,255,255,0.08)',background:'#0a1828',color:'#4a7090',fontSize:11,cursor:'pointer'}}>{lb}</button>
+            ))}
+          </div>
+        </SectionBox>
+
+        {/* Dealt cards */}
+        {dealtCards.length>0&&(
+          <SectionBox title="DEALT CARDS">
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+              {[['A','Andar 🟢',andarCards,'#1a8a40'],['B','Bahar 🔴',baharCards,'#c84030']].map(([side,label,cards,color])=>(
+                <div key={side}>
+                  <div style={{fontSize:9,color,letterSpacing:1,marginBottom:5}}>{label} ({cards.length})</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:3}}>
+                    {cards.map((c,i)=><CardChip key={i} value={c.value} suit={c.suit} small/>)}
+                    {cards.length===0&&<div style={{fontSize:10,color:'#3a5060'}}>—</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </SectionBox>
+        )}
+
+        {/* Card probability */}
+        {jokerCard&&(
+          <SectionBox title="📊 NEXT CARD PROBABILITY" accent="#4ab8d8">
+            <div style={{display:'flex',flexDirection:'column',gap:3}}>
+              {cardProbs.slice(0,8).map(row=>(
+                <div key={row.value} style={{display:'flex',alignItems:'center',gap:7,padding:'6px 9px',borderRadius:7,background:row.isJoker?'rgba(223,192,80,0.07)':'rgba(255,255,255,0.02)',border:`1px solid ${row.isJoker?'rgba(223,192,80,0.3)':'rgba(255,255,255,0.04)'}`}}>
+                  <div style={{width:28,height:28,borderRadius:5,border:`1.5px solid ${row.isJoker?'#dfc050':'rgba(255,255,255,0.13)'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:800,color:row.isJoker?'#dfc050':'#8ab0c8',background:row.isJoker?'rgba(223,192,80,0.1)':'transparent',flexShrink:0}}>{row.value}</div>
+                  <div style={{flex:1}}>
+                    <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+                      <span style={{fontSize:9,color:row.isJoker?'#dfc050':'#6a8aa8'}}>{row.isJoker?'⭐ JOKER — ':''}{row.count} bache</span>
+                      <span style={{fontSize:12,fontWeight:800,color:row.prob>15?'#e07040':row.prob>8?'#dfc050':'#50c888'}}>{row.prob}%</span>
+                    </div>
+                    <div style={{height:4,background:'#050e18',borderRadius:2,overflow:'hidden'}}>
+                      <div style={{height:'100%',width:`${Math.min(100,row.prob*3)}%`,background:row.isJoker?'#dfc050':row.prob>15?'#e07040':'#4a90e8',borderRadius:2,transition:'width 0.4s'}}/>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:7,fontSize:8,color:'#2a4060',textAlign:'center'}}>{TOTAL_DECKS} decks · {dealtCards.length} dealt · {TOTAL_DECKS*52-dealtCards.length} remaining</div>
+          </SectionBox>
+        )}
+        {!jokerCard&&<div style={{textAlign:'center',padding:'20px',color:'#3a5060',fontSize:11}}>☝️ Pehle Joker set karo</div>}
+
+        <div style={{background:'#060f1c',border:'1px solid rgba(255,255,255,0.04)',borderRadius:9,padding:'8px 10px',fontSize:9,color:'#3a5870',lineHeight:1.6,textAlign:'center'}}>
+          8-deck shoe ({TOTAL_DECKS*52} cards). ⚠️ Sirf statistical estimate — actual deck unknown.
+        </div>
+      </>)}
+
+      </div>
+    </div>
+  );
+}
